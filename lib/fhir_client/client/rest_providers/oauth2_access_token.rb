@@ -4,11 +4,20 @@ module FHIR
       class OAuth2
         class AccessToken
           def self.refresh_token_for(fhir_client, **params)
-            return unless fhir_client.client.refresh_token
+            # TODO: What about refreshing the connection when we _don't_ have an access token?
+            # OAuth2 docs say that for client credential methods, the connection can be renewed by simply redoing the workflow.
 
-            if params[:force] || fhir_client.client.expired?
+            # If a refresh token is available...
+            if fhir_client.client.refresh_token
+              # Don't use it unless the client is known expired, or we force a refresh
+              return unless params[:force] || fhir_client.client.expired?
+              
               FHIR.logger.debug "OAuth2 token refresh invoked"
               fhir_client.client = fhir_client.client.refresh!
+            # If a refresh token is not available...
+            else
+              # Build the token from existing known parameters
+              setup_oauth2_token
             end
           end
 

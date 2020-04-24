@@ -149,20 +149,97 @@ module FHIR
     # secret -- client secret
     # authorize_path -- absolute path of authorization endpoint
     # token_path -- absolute path of token endpoint
-    def set_oauth2_auth(client, secret, authorize_path, token_path, site = nil)
+#    def set_oauth2_auth(client, secret, authorize_path, token_path, site = nil)
+#      options = {
+#        client: {authorize_path: authorize_path, token_path: token_path, site: site}.compact
+#      }
+#      set_oauth2_client_credentials client, secret, options
+#    end
+
+    # Set the client to use OpenID Connect OAuth2 Authentication, with more flexibility
+    # client  -- client id
+    # secret  -- client secret
+    # options -- a hash containing the following keys, when applicable
+    #   :client ---- a list of options to pass to OAuth2::Client
+    #   :token  ---- a list of options to pass to `get_token`
+#    def set_oauth2_client_credentials(client, secret, options = {})
+#      FHIR.logger.info 'Configuring the client to use OpenID Connect OAuth2 authentication.'
+#      @use_oauth2_auth = true
+#      @use_basic_auth = false
+#      @security_headers = {}
+#
+#      client_options = { raise_errors: true, site: @base_service_url }
+#      client_options.merge! get_oauth2_metadata_from_conformance(options[:conformance])
+#      client_options.merge! options[:client] if options[:client]
+#
+#      token_options = options[:token]
+#
+#      @oauth2_options = {
+#        client: client_options,
+#        token:  token_options
+#      }
+#
+#      client = OAuth2::Client.new(client, secret, client_options)
+#      client.connection.proxy(proxy) unless proxy.nil?
+#      @client = client.client_credentials.get_token token_options
+#    end
+
+    # Set the client to use OpenID Connect OAuth2 Authentication
+    # client  -- client id
+    # secret  -- client secret
+    # oauth2_method -- the symbol representation of the method to call on the `OAuth2::Client` instance before calling `get_token`
+    # options -- `Hash` containing the following:
+    #   * conformance -- strictness for the `get_oauth2_metadata_from_conformance` call
+    #   * client -- `Hash` of options to send to OAuth2::Client.new
+    #   * token -- `Array` of options to pass to match the signature of the requested `oauth2_method`
+    #              When `:manual`, this signature is expected as the following:
+    #     * token -- The `access_token`, if known. Specify `nil` otherwise.
+    #     * options -- The OAuth2::AccessToken options. Set the `refresh_token` key here if you have a refresh token.
+    def set_oauth2_auth(client, secret, oauth2_method = :client_credentials, **options)
       FHIR.logger.info 'Configuring the client to use OpenID Connect OAuth2 authentication.'
-      @use_oauth2_auth = true
-      @use_basic_auth = false
+      @use_oauth2_auth  = true
+      @use_basic_auth   = false
       @security_headers = {}
-      options = {
-        site: site || @base_service_url,
-        authorize_url: authorize_path,
-        token_url: token_path,
-        raise_errors: true
+
+      # Configure OAuth2::Client
+      client_options = {raise_errors: true, site: @base_service_url}                    # Defaults
+      client_options.merge! get_oauth2_metadata_from_conformance(options[:conformance]) # Merge authorize_url and token_url from discovery
+      client_options.merge! options[:client] if options[:client].is_a? Hash             # Merge specified options, including overrides
+      # Configure OAuth2::AccessToken
+      token_options   = options[:token] if options[:token].is_a? Array
+      token_options ||= []
+      # Preserve these options for later
+      @oauth2_options = {
+        method: oauth2_method,
+        client: client_options,
+        token:  token_options
       }
-      client = OAuth2::Client.new(client, secret, options)
-      client.connection.proxy(proxy) unless proxy.nil?
-      @client = client.client_credentials.get_token
+
+      # Setup OAuth2 client
+      client = OAuth2::Client.new(client, secret, client_options)
+      client.connection.proxy(proxy) if proxy
+
+      setup_oauth2_token(client)
+    end
+
+    # Build an OAuth2::AccessToken.
+    def setup_oauth2_token(client = nil)
+      # Retrieve the original OAuth2::Client object if available
+      client ||= @client.client if @client
+      raise "No OAuth2::Client was passed, and no OAuth2::Client is available to inherit" unless client.is_a? OAuth2::Client
+      raise "set_oauth2_auth must be ran prior to build_oauth2_token"                     unless @oauth2_options.is_a? Hash
+
+      # If :manual is specified as a method, construct the OAuth2::AccessToken manually.
+      if @oauth2_options[:method] == :manual
+        @client = OAuth2::AccessToken.new(client, *@oauth2_options[:token])
+        @client = @client.refresh! if @client.token.empty?
+      else
+        # Build (or rebuild) the OAuth2::AccessToken
+        @client = client.send(@oauth2_options[:method]).get_token *@oauth2_options[:token]
+        # If a refresh token was provided, discard the token parameters from the OAuth2 options
+        # This provides protection to user credentials if :password is used
+        @oauth2_options.delete(:token) if @client.refresh_token
+      end
     end
 
     # Get the OAuth2 server and endpoints from the capability statement
@@ -228,13 +305,9 @@ module FHIR
       }
       rest.security.extension.find{|x| x.url == oauth_extension}.extension.each do |ext|
         case ext.url
-        when authorize_extension
+        when authorize_extension, "#{oauth_extension}\##{authorize_extension}"
           options[:authorize_url] = ext.value
-        when "#{oauth_extension}\##{authorize_extension}"
-          options[:authorize_url] = ext.value
-        when token_extension
-          options[:token_url] = ext.value
-        when "#{oauth_extension}\##{token_extension}"
+        when token_extension, "#{oauth_extension}\##{token_extension}"
           options[:token_url] = ext.value
         end
       end
