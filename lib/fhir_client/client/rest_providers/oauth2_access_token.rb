@@ -17,7 +17,7 @@ module FHIR
             # If a refresh token is not available...
             else
               # Build the token from existing known parameters
-              setup_oauth2_token
+              fhir_client.setup_oauth2_token
             end
           end
 
